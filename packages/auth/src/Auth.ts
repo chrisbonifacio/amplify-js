@@ -328,7 +328,10 @@ export class AuthClass {
 				validationData = [];
 				Object.keys(validationDataObject).map(key => {
 					validationData.push(
-						new CognitoUserAttribute({ Name: key, Value: validationDataObject[key] })
+						new CognitoUserAttribute({
+							Name: key,
+							Value: validationDataObject[key],
+						})
 					);
 				});
 			}
@@ -1612,12 +1615,13 @@ export class AuthClass {
 				);
 			} else {
 				logger.debug('user sign out', user);
-				user.signOut();
-				if (isSignedInHostedUI) {
-					this.oAuthSignOutRedirect(res, rej);
-				} else {
-					return res();
-				}
+				user.signOut(() => {
+					if (isSignedInHostedUI) {
+						this.oAuthSignOutRedirect(res, rej);
+					} else {
+						return res();
+					}
+				});
 			}
 		});
 	}
