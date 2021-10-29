@@ -376,7 +376,7 @@ class AWSCloudWatchProvider implements LoggingProvider {
 				return '';
 			}
 
-			this._nextSequenceToken = logStream.uploadSequenceToken || '';
+			this._nextSequenceToken = logStream.uploadSequenceToken || undefined;
 
 			return this._nextSequenceToken;
 		} catch (err) {
