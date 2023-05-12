@@ -8,15 +8,10 @@ import {
 	CognitoIdToken,
 	CognitoAccessToken,
 	NodeCallback,
+	ISignUpResult,
 } from 'amazon-cognito-identity-js';
 
 const MAX_DEVICES: number = 60;
-
-jest.mock('crypto-js/sha256', () => {
-	return {
-		default: jest.fn(() => ''),
-	};
-});
 
 jest.mock('../src/OAuth/oauthStorage', () => {
 	return {
@@ -85,6 +80,7 @@ jest.mock('amazon-cognito-identity-js/lib/CognitoUserPool', () => {
 	CognitoUserPool.prototype.getCurrentUser = () => {
 		return {
 			username: 'username',
+			attributes: { email: 'test@test.com' },
 			getSession: callback => {
 				// throw 3;
 				callback(null, {
@@ -114,7 +110,10 @@ jest.mock('amazon-cognito-identity-js/lib/CognitoUserPool', () => {
 });
 
 jest.mock('amazon-cognito-identity-js/lib/CognitoUser', () => {
-	const CognitoUser = () => {};
+	const CognitoUser = function() {
+		// mock private member
+		this.signInUserSession = null;
+	};
 
 	CognitoUser.prototype.CognitoUser = options => {
 		CognitoUser.prototype.options = options;
@@ -256,6 +255,9 @@ jest.mock('amazon-cognito-identity-js/lib/CognitoUser', () => {
 	CognitoUser.prototype.listDevices = (limit, paginationToken, callback) => {
 		callback.onSuccess('success');
 	};
+	CognitoUser.prototype.getSignInUserSession = function() {
+		return this.signInUserSession;
+	};
 
 	return CognitoUser;
 });
@@ -279,14 +281,7 @@ const createMockLocalStorage = () =>
 
 import { AuthOptions, SignUpParams, AwsCognitoOAuthOpts } from '../src/types';
 import { AuthClass as Auth } from '../src/Auth';
-import Cache from '@aws-amplify/cache';
-import {
-	Credentials,
-	GoogleOAuth,
-	StorageHelper,
-	ICredentials,
-	Hub,
-} from '@aws-amplify/core';
+import { Credentials, StorageHelper, Hub } from '@aws-amplify/core';
 import { AuthError, NoUserPoolError } from '../src/Errors';
 import { AuthErrorTypes } from '../src/types/Auth';
 import { mockDeviceArray, transformedMockData } from './mockData';
@@ -319,6 +314,14 @@ const authOptionsWithHostedUIConfig: AuthOptions = {
 		responseType: 'code',
 	},
 };
+const authOptionConfirmationLink: AuthOptions = {
+	userPoolId: 'awsUserPoolsId',
+	userPoolWebClientId: 'awsUserPoolsWebClientId',
+	region: 'region',
+	identityPoolId: 'awsCognitoIdentityPoolId',
+	mandatorySignIn: false,
+	signUpVerificationMethod: 'link',
+};
 
 const authOptionsWithClientMetadata: AuthOptions = {
 	userPoolId: 'awsUserPoolsId',
@@ -342,6 +345,13 @@ const userPool = new CognitoUserPool({
 	UserPoolId: authOptions.userPoolId,
 	ClientId: authOptions.userPoolWebClientId,
 });
+
+const signUpResult: ISignUpResult = {
+	user: null,
+	userConfirmed: true,
+	userSub: 'userSub',
+	codeDeliveryDetails: null,
+};
 
 const idToken = new CognitoIdToken({ IdToken: 'idToken' });
 const accessToken = new CognitoAccessToken({ AccessToken: 'accessToken' });
@@ -555,6 +565,122 @@ describe('auth unit test', () => {
 			expect.assertions(2);
 			expect(auth.signUp('username').then()).rejects.toThrow(AuthError);
 			expect(auth.signUp('username').then()).rejects.toEqual(errorMessage);
+		});
+	});
+
+	describe('autoSignInAfterSignUp', () => {
+		test('happy case auto confirm', async () => {
+			const spyon = jest
+				.spyOn(CognitoUserPool.prototype, 'signUp')
+				.mockImplementationOnce(
+					(
+						username,
+						password,
+						signUpAttributeList,
+						validationData,
+						callback,
+						clientMetadata
+					) => {
+						callback(null, signUpResult);
+					}
+				);
+			const signInSpyon = jest.spyOn(CognitoUser.prototype, 'authenticateUser');
+			const auth = new Auth(authOptions);
+			const attrs = {
+				username: 'username',
+				password: 'password',
+				attributes: {
+					email: 'email',
+					phone_number: 'phone_number',
+					otherAttrs: 'otherAttrs',
+				},
+				autoSignIn: { enabled: true },
+			};
+			expect(await auth.signUp(attrs)).toBe(signUpResult);
+			expect(signInSpyon).toHaveBeenCalledTimes(1);
+			spyon.mockClear();
+			signInSpyon.mockClear();
+		});
+
+		test('happy case confirmation code', async () => {
+			const spyon = jest.spyOn(CognitoUserPool.prototype, 'signUp');
+			const confirmSpyon = jest.spyOn(
+				CognitoUser.prototype,
+				'confirmRegistration'
+			);
+			const signInSpyon = jest.spyOn(CognitoUser.prototype, 'authenticateUser');
+			const auth = new Auth(authOptions);
+			const attrs = {
+				username: 'username',
+				password: 'password',
+				attributes: {
+					email: 'email',
+					phone_number: 'phone_number',
+					otherAttrs: 'otherAttrs',
+				},
+				autoSignIn: { enabled: true },
+			};
+			expect(await auth.signUp(attrs)).toBe('signUpResult');
+			expect(await auth.confirmSignUp('username', 'code')).toBe('Success');
+			expect(signInSpyon).toHaveBeenCalledTimes(1);
+			spyon.mockClear();
+			confirmSpyon.mockClear();
+			signInSpyon.mockClear();
+		});
+
+		test('happy case confirmation link', async () => {
+			jest.useFakeTimers();
+			const spyon = jest.spyOn(CognitoUserPool.prototype, 'signUp');
+			const signInSpyon = jest.spyOn(CognitoUser.prototype, 'authenticateUser');
+			const auth = new Auth(authOptionConfirmationLink);
+			const attrs = {
+				username: 'username',
+				password: 'password',
+				attributes: {
+					email: 'email',
+					phone_number: 'phone_number',
+					otherAttrs: 'otherAttrs',
+				},
+				autoSignIn: { enabled: true },
+			};
+			expect(await auth.signUp(attrs)).toBe('signUpResult');
+			jest.advanceTimersByTime(11000);
+			expect(signInSpyon).toHaveBeenCalledTimes(2);
+			spyon.mockClear();
+			signInSpyon.mockClear();
+		});
+
+		test('fail confirmation code', async () => {
+			const spyon = jest.spyOn(CognitoUserPool.prototype, 'signUp');
+			const confirmSpyon = jest
+				.spyOn(CognitoUser.prototype, 'confirmRegistration')
+				.mockImplementationOnce(
+					(confirmationCode, forceAliasCreation, callback) => {
+						callback('err', null);
+					}
+				);
+			const signInSpyon = jest.spyOn(CognitoUser.prototype, 'authenticateUser');
+			const auth = new Auth(authOptions);
+			const attrs = {
+				username: 'username',
+				password: 'password',
+				attributes: {
+					email: 'email',
+					phone_number: 'phone_number',
+					otherAttrs: 'otherAttrs',
+				},
+				autoSignIn: { enabled: true },
+			};
+			expect(await auth.signUp(attrs)).toBe('signUpResult');
+			try {
+				await auth.confirmSignUp('username', 'code');
+			} catch (e) {
+				expect(e).toBe('err');
+			}
+			expect(signInSpyon).toHaveBeenCalledTimes(0);
+			spyon.mockClear();
+			confirmSpyon.mockClear();
+			signInSpyon.mockClear();
 		});
 	});
 
@@ -1207,6 +1333,34 @@ describe('auth unit test', () => {
 			spyon.mockClear();
 		});
 
+		test('happy case attributes are appended', async () => {
+			const spyon = jest
+				.spyOn(CognitoUser.prototype, 'sendMFACode')
+				.mockImplementationOnce((code, callback) => {
+					callback.onSuccess(session);
+				});
+			const hubSpy = jest.spyOn(Hub, 'dispatch');
+			const auth = new Auth(authOptions);
+			const user = new CognitoUser({
+				Username: 'username',
+				Pool: userPool,
+			});
+			const expectedUser = Object.assign(user, { email: 'test@test.com' });
+			const result = await auth.confirmSignIn(user, 'code', null);
+			expect(result.attributes.email).toEqual('test@test.com');
+			expect(hubSpy).toHaveBeenCalledWith(
+				'auth',
+				{
+					data: expectedUser,
+					event: 'signIn',
+					message: 'A user username has been signed in',
+				},
+				'Auth',
+				Symbol.for('amplify_default')
+			);
+			spyon.mockClear();
+		});
+
 		test('happy case clientMetadata default', async () => {
 			const spyon = jest.spyOn(CognitoUser.prototype, 'sendMFACode');
 			const auth = new Auth(authOptionsWithClientMetadata);
@@ -1252,6 +1406,39 @@ describe('auth unit test', () => {
 			);
 			spyon.mockClear();
 		});
+
+        test('currentUserPoolUser fails but hub event still dispatches', async () => {
+            const auth = new Auth(authOptions);
+            const spyon = jest
+                .spyOn(CognitoUser.prototype, 'sendMFACode')
+                .mockImplementationOnce((code, callback) => {
+                    callback.onSuccess(session);
+                });
+
+            const spyon2 = jest
+                .spyOn(auth, 'currentUserPoolUser')
+                .mockImplementationOnce(() => {
+                    return Promise.reject('Could not get current user.');
+                });
+            const hubSpy = jest.spyOn(Hub, 'dispatch');
+            const user = new CognitoUser({
+                Username: 'username',
+                Pool: userPool,
+            });
+            const result = await auth.confirmSignIn(user, 'code', null);
+            expect(result).toEqual(user);
+            expect(hubSpy).toHaveBeenCalledWith(
+                'auth',
+                {
+                    data: user,
+                    event: 'signIn',
+                    message: 'A user username has been signed in',
+                },
+                'Auth',
+                Symbol.for('amplify_default')
+            );
+            spyon.mockClear();
+        });
 
 		test('onFailure', async () => {
 			const spyon = jest
@@ -1517,6 +1704,7 @@ describe('auth unit test', () => {
 	describe('currentSession', () => {
 		afterEach(() => {
 			jest.clearAllMocks();
+			jest.useRealTimers();
 		});
 		test('happy case', async () => {
 			const auth = new Auth(authOptions);
@@ -1603,13 +1791,12 @@ describe('auth unit test', () => {
 				identityPoolId: 'awsCognitoIdentityPoolId',
 				mandatorySignIn: false,
 			});
-			const errorMessage = new NoUserPoolError(
-				AuthErrorTypes.MissingAuthConfig
-			);
+
+			const noUserPoolError = Error('No User Pool in the configuration.');
 
 			expect.assertions(2);
-			expect(auth.currentSession().then()).rejects.toThrow(NoUserPoolError);
-			expect(auth.currentSession().then()).rejects.toEqual(errorMessage);
+			expect(auth.currentSession().then()).rejects.toThrow(Error);
+			expect(auth.currentSession().then()).rejects.toEqual(noUserPoolError);
 		});
 	});
 
@@ -1688,6 +1875,35 @@ describe('auth unit test', () => {
 			spyon.mockClear();
 		});
 
+		test('debouncer happy case', async () => {
+			const concurrency = 10;
+			const spyon = jest
+				.spyOn(CognitoUser.prototype, 'getSession')
+				.mockImplementationOnce(function(callback: any) {
+					this.signInUserSession = session;
+					callback(null, session);
+				});
+			expect.assertions(2 * concurrency + 1);
+
+			const auth = new Auth(authOptions);
+
+			const promiseArr = Array.from({ length: concurrency }, async () => {
+				const user = new CognitoUser({
+					Username: 'username',
+					Pool: userPool,
+				});
+				const signInUserSession = await auth.userSession(user);
+				return [signInUserSession, user] as const;
+			});
+			const results = await Promise.all(promiseArr);
+			for (const [signInUserSession, user] of results) {
+				expect(signInUserSession).toBeInstanceOf(CognitoUserSession);
+				expect(user.getSignInUserSession()).toBe(signInUserSession);
+			}
+			expect(spyon).toHaveBeenCalledTimes(1);
+			spyon.mockClear();
+		});
+
 		test('callback error', async () => {
 			const auth = new Auth(authOptions);
 			const user = new CognitoUser({
@@ -1708,6 +1924,32 @@ describe('auth unit test', () => {
 				expect(e).toBe('err');
 			}
 
+			spyon.mockClear();
+		});
+
+		test('debounce callback error', async () => {
+			const auth = new Auth(authOptions);
+
+			const spyon = jest
+				.spyOn(CognitoUser.prototype, 'getSession')
+				.mockImplementationOnce((callback: any) => {
+					callback('err', null);
+				});
+			expect.assertions(2);
+			try {
+				const promiseArr = Array.from({ length: 10 }, async () => {
+					const user = new CognitoUser({
+						Username: 'username',
+						Pool: userPool,
+					});
+					return await auth.userSession(user);
+				});
+				await Promise.all(promiseArr);
+				fail('expect promise to reject');
+			} catch (e) {
+				expect(e).toBe('err');
+			}
+			expect(spyon).toHaveBeenCalledTimes(1);
 			spyon.mockClear();
 		});
 
@@ -1754,6 +1996,47 @@ describe('auth unit test', () => {
 				'Auth',
 				Symbol.for('amplify_default')
 			);
+			jest.clearAllMocks();
+		});
+
+		test('debounce refresh token revoked case', async () => {
+			const auth = new Auth(authOptions);
+			const credentialsClearSpy = jest.spyOn(Credentials, 'clear');
+			const hubSpy = jest.spyOn(Hub, 'dispatch');
+			let user: CognitoUser | null = null;
+			const getSessionSpy = jest
+				.spyOn(CognitoUser.prototype, 'getSession')
+				.mockImplementationOnce((callback: any) => {
+					callback(new Error('Refresh Token has been revoked'), null);
+				});
+			const userSignoutSpy = jest.fn();
+			expect.assertions(5);
+			const promiseArr = Array.from({ length: 10 }, async () => {
+				user = new CognitoUser({
+					Username: 'username',
+					Pool: userPool,
+				});
+				jest.spyOn(user, 'signOut').mockImplementationOnce(() => {
+					userSignoutSpy();
+				});
+				return await auth.userSession(user);
+			});
+			try {
+				await Promise.all(promiseArr);
+				fail('expect promise to reject');
+			} catch (e) {
+				expect(e.message).toBe('Refresh Token has been revoked');
+			}
+			expect(getSessionSpy).toHaveBeenCalledTimes(1);
+			expect(userSignoutSpy).toHaveBeenCalledTimes(1);
+			expect(credentialsClearSpy).toHaveBeenCalledTimes(1);
+			expect(hubSpy).toHaveBeenCalledWith(
+				'auth',
+				{ data: null, event: 'signOut', message: 'A user has been signed out' },
+				'Auth',
+				Symbol.for('amplify_default')
+			);
+			jest.clearAllMocks();
 		});
 	});
 
@@ -1779,7 +2062,7 @@ describe('auth unit test', () => {
 			const spyon2 = jest
 				.spyOn(Credentials, 'refreshFederatedToken')
 				.mockImplementationOnce(() => {
-					return Promise.resolve('cred');
+					return Promise.resolve('cred' as any);
 				});
 
 			expect.assertions(1);
@@ -2772,6 +3055,102 @@ describe('auth unit test', () => {
 				jasmine.any(Function),
 				{ custom: 'value' }
 			);
+			spyon.mockClear();
+		});
+
+		test('error hub event', async (done) => {
+			expect.assertions(3);
+			const spyon = jest.spyOn(CognitoUser.prototype, 'updateAttributes')
+				.mockImplementationOnce((attrs, callback: any) => {
+					callback(new Error('Error'), null, null);
+			});
+
+			const auth = new Auth(authOptions);
+
+			const user = new CognitoUser({
+				Username: 'username',
+				Pool: userPool,
+			});
+
+			const attributes = {
+				email: 'email',
+				phone_number: 'phone_number',
+				sub: 'sub',
+			};
+
+			const listenToHub = Hub.listen('auth', ({ payload }) => {
+				const { event } = payload;
+				if (event === 'updateUserAttributes_failure') {
+					expect(payload.data.message).toBe('Error');
+					expect(payload.message).toBe('Failed to update attributes');
+					listenToHub();
+					done();
+				}
+			});
+
+			try {
+				await auth.updateUserAttributes(user, attributes);
+			} catch (e) {
+				expect(e).toEqual(new Error('Error'));
+			}
+
+			spyon.mockClear();
+		});
+
+		test('happy case code delivery details hub event', async (done) => {
+			expect.assertions(2);
+			
+			const codeDeliverDetailsResult: any = {
+				'CodeDeliveryDetailsList': [ 
+				   { 
+					  'AttributeName': 'email',
+					  'DeliveryMedium': 'EMAIL',
+					  'Destination': 'e***@e***'
+				   }
+				]
+			};
+			const spyon = jest.spyOn(CognitoUser.prototype, 'updateAttributes')
+				.mockImplementationOnce((attrs, callback: any) => {
+					callback(null, 'SUCCESS', codeDeliverDetailsResult);
+				});
+			const auth = new Auth(authOptions);
+
+			const user = new CognitoUser({
+				Username: 'username',
+				Pool: userPool,
+			});
+
+			const attributes = {
+				email: 'email',
+				phone_number: 'phone_number',
+				sub: 'sub',
+			};
+			const payloadData = {
+				'email': {
+					isUpdated: false,
+					codeDeliveryDetails: {
+						AttributeName: 'email',
+						DeliveryMedium: 'EMAIL',
+						Destination: 'e***@e***'
+					}
+				},
+				'phone_number': {
+					isUpdated: true
+				},
+				'sub': {
+					isUpdated: true
+				}
+			};
+			const listenToHub = Hub.listen('auth', ({ payload }) => {
+				const { event } = payload;
+				if (event === 'updateUserAttributes') {
+					expect(payload.data).toEqual(payloadData);
+					listenToHub();
+					done();
+				}
+			});
+
+			expect(await auth.updateUserAttributes(user, attributes)).toBe('SUCCESS');
 			spyon.mockClear();
 		});
 	});

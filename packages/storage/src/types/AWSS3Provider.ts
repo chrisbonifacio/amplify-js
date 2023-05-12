@@ -12,6 +12,7 @@ import {
 	UploadTaskProgressEvent,
 } from '../providers/AWSS3UploadTask';
 import { UploadTask } from './Provider';
+import { ICredentials } from '@aws-amplify/core';
 
 type ListObjectsCommandOutputContent = _Object;
 
@@ -47,6 +48,7 @@ export type S3ProviderGetConfig = CommonStorageOptions & {
 	SSECustomerAlgorithm?: GetObjectRequest['SSECustomerAlgorithm'];
 	SSECustomerKey?: GetObjectRequest['SSECustomerKey'];
 	SSECustomerKeyMD5?: GetObjectRequest['SSECustomerKeyMD5'];
+	validateObjectExistence?: boolean;
 };
 
 export type S3ProviderGetOuput<T> = T extends { download: true }
@@ -82,6 +84,15 @@ export type ResumableUploadConfig = {
 	errorCallback?: (err: any) => any;
 };
 
+/**
+ * Configuration options for the S3 put function.
+ *
+ * @remarks
+ * The acl parameter may now only be used for S3 buckets with specific Object Owner settings.
+ * Usage of this parameter is not considered a recommended practice:
+ *  {@link https://docs.aws.amazon.com/AmazonS3/latest/userguide/about-object-ownership.html}
+ *
+ */
 export type S3ProviderPutConfig = CommonStorageOptions &
 	(
 		| _S3ProviderPutConfig
@@ -94,14 +105,25 @@ export type S3ProviderRemoveConfig = CommonStorageOptions & {
 	provider?: 'AWSS3';
 };
 
+export type S3ProviderListOutput = {
+	results: S3ProviderListOutputItem[];
+	nextToken?: string;
+	hasNextToken: boolean;
+};
+
 export type S3ProviderRemoveOutput = DeleteObjectCommandOutput;
 
 export type S3ProviderListConfig = CommonStorageOptions & {
 	bucket?: string;
-	maxKeys?: number;
+	pageSize?: number | 'ALL';
 	provider?: 'AWSS3';
 	identityId?: string;
+	nextToken?: string;
 };
+
+export type S3ClientOptions = StorageOptions & {
+	credentials: ICredentials;
+} & S3ProviderListConfig;
 
 export interface S3ProviderListOutputItem {
 	key: ListObjectsCommandOutputContent['Key'];
@@ -109,8 +131,6 @@ export interface S3ProviderListOutputItem {
 	lastModified: ListObjectsCommandOutputContent['LastModified'];
 	size: ListObjectsCommandOutputContent['Size'];
 }
-
-export type S3ProviderListOutput = S3ProviderListOutputItem[];
 
 export interface S3CopyTarget {
 	key: string;
@@ -122,6 +142,15 @@ export type S3CopySource = S3CopyTarget;
 
 export type S3CopyDestination = Omit<S3CopyTarget, 'identityId'>;
 
+/**
+ * Configuration options for the S3 copy function.
+ *
+ * @remarks
+ * The acl parameter may now only be used for S3 buckets with specific Object Owner settings.
+ * Usage of this parameter is not considered a recommended practice:
+ *  {@link https://docs.aws.amazon.com/AmazonS3/latest/userguide/about-object-ownership.html}
+ *
+ */
 export type S3ProviderCopyConfig = Omit<CommonStorageOptions, 'level'> & {
 	provider?: 'AWSS3';
 	bucket?: CopyObjectRequest['Bucket'];

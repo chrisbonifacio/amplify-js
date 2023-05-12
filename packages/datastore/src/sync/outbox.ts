@@ -11,14 +11,15 @@ import {
 	PersistentModel,
 	PersistentModelConstructor,
 	QueryOne,
+	SchemaModel,
 } from '../types';
 import { USER, SYNC, valuesEqual } from '../util';
-import { TransformerMutationType } from './utils';
+import { getIdentifierValue, TransformerMutationType } from './utils';
 
 // TODO: Persist deleted ids
 // https://github.com/aws-amplify/amplify-js/blob/datastore-docs/packages/datastore/docs/sync-engine.md#outbox
 class MutationEventOutbox {
-	private inProgressMutationEventId: string;
+	private inProgressMutationEventId!: string;
 
 	constructor(
 		private readonly schema: InternalSchema,
@@ -31,25 +32,32 @@ class MutationEventOutbox {
 		storage: Storage,
 		mutationEvent: MutationEvent
 	): Promise<void> {
-		storage.runExclusive(async s => {
+		await storage.runExclusive(async s => {
 			const mutationEventModelDefinition =
 				this.schema.namespaces[SYNC].models['MutationEvent'];
 
-			const predicate = ModelPredicateCreator.createFromExisting<MutationEvent>(
+			// `id` is the key for the record in the mutationEvent;
+			// `modelId` is the key for the actual record that was mutated
+			const predicate = ModelPredicateCreator.createFromAST<MutationEvent>(
 				mutationEventModelDefinition,
-				c =>
-					c
-						.modelId('eq', mutationEvent.modelId)
-						.id('ne', this.inProgressMutationEventId)
+				{
+					and: [
+						{ modelId: { eq: mutationEvent.modelId } },
+						{ id: { ne: this.inProgressMutationEventId } },
+					],
+				}
 			);
 
+			// Check if there are any other records with same id
 			const [first] = await s.query(this.MutationEvent, predicate);
 
+			// No other record with same modelId, so enqueue
 			if (first === undefined) {
 				await s.save(mutationEvent, undefined, this.ownSymbol);
 				return;
 			}
 
+			// There was an enqueued mutation for the modelId, so continue
 			const { operation: incomingMutationType } = mutationEvent;
 
 			if (first.operation === TransformerMutationType.CREATE) {
@@ -82,7 +90,7 @@ class MutationEventOutbox {
 					await s.delete(this.MutationEvent, predicate);
 				}
 
-				merged = merged || mutationEvent;
+				merged = merged! || mutationEvent;
 
 				// Enqueue new one
 				await s.save(merged, undefined, this.ownSymbol);
@@ -98,11 +106,11 @@ class MutationEventOutbox {
 		const head = await this.peek(storage);
 
 		if (record) {
-			await this.syncOutboxVersionsOnDequeue(storage, record, head, recordOp);
+			await this.syncOutboxVersionsOnDequeue(storage, record, head, recordOp!);
 		}
 
 		await storage.delete(head);
-		this.inProgressMutationEventId = undefined;
+		this.inProgressMutationEventId = undefined!;
 
 		return head;
 	}
@@ -115,24 +123,26 @@ class MutationEventOutbox {
 	public async peek(storage: StorageFacade): Promise<MutationEvent> {
 		const head = await storage.queryOne(this.MutationEvent, QueryOne.FIRST);
 
-		this.inProgressMutationEventId = head ? head.id : undefined;
+		this.inProgressMutationEventId = head ? head.id : undefined!;
 
-		return head;
+		return head!;
 	}
 
 	public async getForModel<T extends PersistentModel>(
 		storage: StorageFacade,
-		model: T
+		model: T,
+		userModelDefinition: SchemaModel
 	): Promise<MutationEvent[]> {
 		const mutationEventModelDefinition =
 			this.schema.namespaces[SYNC].models.MutationEvent;
 
+		const modelId = getIdentifierValue(userModelDefinition, model);
+
 		const mutationEvents = await storage.query(
 			this.MutationEvent,
-			ModelPredicateCreator.createFromExisting(
-				mutationEventModelDefinition,
-				c => c.modelId('eq', model.id)
-			)
+			ModelPredicateCreator.createFromAST(mutationEventModelDefinition, {
+				and: { modelId: { eq: modelId } },
+			})
 		);
 
 		return mutationEvents;
@@ -180,6 +190,10 @@ class MutationEventOutbox {
 
 		// Don't sync the version when the data in the response does not match the data
 		// in the request, i.e., when there's a handled conflict
+		//
+		// NOTE: `incomingData` contains all the fields in the record, and `outgoingData`
+		// only contains updated fields, resulting in an error when doing a comparison
+		// of two equal mutations. Fix this, or mitigate otherwise.
 		if (!valuesEqual(incomingData, outgoingData, true)) {
 			return;
 		}
@@ -187,9 +201,19 @@ class MutationEventOutbox {
 		const mutationEventModelDefinition =
 			this.schema.namespaces[SYNC].models['MutationEvent'];
 
-		const predicate = ModelPredicateCreator.createFromExisting<MutationEvent>(
+		const userModelDefinition =
+			this.schema.namespaces['user'].models[head.model];
+
+		const recordId = getIdentifierValue(userModelDefinition, record);
+
+		const predicate = ModelPredicateCreator.createFromAST<MutationEvent>(
 			mutationEventModelDefinition,
-			c => c.modelId('eq', record.id).id('ne', this.inProgressMutationEventId)
+			{
+				and: [
+					{ modelId: { eq: recordId } },
+					{ id: { ne: this.inProgressMutationEventId } },
+				],
+			}
 		);
 
 		const outdatedMutations = await storage.query(
@@ -224,11 +248,11 @@ class MutationEventOutbox {
 		previous: MutationEvent,
 		current: MutationEvent
 	): MutationEvent {
-		const { _version, id, _lastChangedAt, _deleted, ...previousData } =
-			JSON.parse(previous.data);
+		const { _version, _lastChangedAt, _deleted, ...previousData } = JSON.parse(
+			previous.data
+		);
 
 		const {
-			id: __id,
 			_version: __version,
 			_lastChangedAt: __lastChangedAt,
 			_deleted: __deleted,
@@ -236,7 +260,6 @@ class MutationEventOutbox {
 		} = JSON.parse(current.data);
 
 		const data = JSON.stringify({
-			id,
 			_version,
 			_lastChangedAt,
 			_deleted,

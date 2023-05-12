@@ -22,6 +22,7 @@ export const mutationErrorMap: ErrorMap = {
 	ConfigError: () => false,
 	Transient: error => connectionTimeout(error) || serverError(error),
 	Unauthorized: error =>
+		error.message === 'Unauthorized' ||
 		/^Request failed with status code 401/.test(error.message),
 };
 
@@ -44,7 +45,7 @@ export const syncErrorMap: ErrorMap = {
 	BadRecord: error => /^Cannot return \w+ for [\w-_]+ type/.test(error.message),
 	ConfigError: () => false,
 	Transient: error => connectionTimeout(error) || serverError(error),
-	Unauthorized: () => false,
+	Unauthorized: error => (error as any).errorType === 'Unauthorized',
 };
 
 /**
@@ -85,7 +86,7 @@ export function mapErrorToType(errorMap: ErrorMap, error: Error): ErrorType {
 	const errorTypes = [...Object.keys(errorMap)] as ErrorType[];
 	for (const errorType of errorTypes) {
 		const matcher = errorMap[errorType];
-		if (matcher(error)) {
+		if (matcher?.(error)) {
 			return errorType;
 		}
 	}
